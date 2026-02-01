@@ -3,19 +3,24 @@ import os
 import sqlite3
 from datetime import datetime, date
 
-import libsql_client  # ✅ importante: módulo correto
+import libsql  # ✅ novo SDK oficial
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# Arquivos locais
 DB_PATH = os.environ.get("DB_PATH", os.path.join(APP_DIR, "attendance.db"))
 BOLSISTAS_PATH = os.path.join(APP_DIR, "bolsistas.txt")
 IPS_PATH = os.path.join(APP_DIR, "ips.txt")
 
-LIBSQL_URL = os.environ.get("LIBSQL_URL")
-LIBSQL_AUTH_TOKEN = os.environ.get("LIBSQL_AUTH_TOKEN")
+# Turso (Render)
+TURSO_DATABASE_URL = os.environ.get("TURSO_DATABASE_URL")  # ex: libsql://....
+TURSO_AUTH_TOKEN = os.environ.get("TURSO_AUTH_TOKEN")      # token JWT
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "troque-esta-chave")
+
+# cache da conexão
+_CONN = None
 
 
 # ---------- Utilidades ----------
@@ -39,72 +44,56 @@ def format_hhmm_from_seconds(seconds):
     return f"{m//60:02d}:{m%60:02d}"
 
 
-# ---------- DB Layer (Turso sync ou SQLite local) ----------
-
-_TURSO_CLIENT = None  # cache do client sync
+# ---------- Conexão DB ----------
 
 def using_turso() -> bool:
-    return bool(LIBSQL_URL and LIBSQL_AUTH_TOKEN)
+    return bool(TURSO_DATABASE_URL and TURSO_AUTH_TOKEN)
 
 
-def get_turso_client_sync():
-    global _TURSO_CLIENT
-    if _TURSO_CLIENT is None:
-        # ✅ create_client_sync: roda loop em background e funciona em Flask/Gunicorn sync
-        _TURSO_CLIENT = libsql_client.create_client_sync(
-            LIBSQL_URL,
-            auth_token=LIBSQL_AUTH_TOKEN
+def get_conn():
+    """
+    Local: sqlite3.connect(DB_PATH)
+    Render/Turso: libsql.connect(local_replica.db, sync_url=..., auth_token=...)
+    """
+    global _CONN
+    if _CONN is not None:
+        return _CONN
+
+    if using_turso():
+        # ✅ Embedded replica: cria/usa um arquivo local (mesmo se efêmero) e sincroniza com Turso
+        # O Render pode perder esse arquivo ao redeploy, mas ao subir ele sincroniza de novo.
+        local_replica_path = os.path.join(APP_DIR, "replica.db")
+
+        _CONN = libsql.connect(
+            local_replica_path,
+            sync_url=TURSO_DATABASE_URL,
+            auth_token=TURSO_AUTH_TOKEN
         )
-    return _TURSO_CLIENT
+        _CONN.row_factory = sqlite3.Row
 
+        # ✅ sincroniza no startup (baixa o estado do banco remoto)
+        _CONN.sync()
 
-def get_sqlite_conn():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def db_execute(sql: str, params=None):
-    params = params or []
-    if using_turso():
-        client = get_turso_client_sync()
-        return client.execute(sql, params)
     else:
-        with get_sqlite_conn() as conn:
-            cur = conn.execute(sql, params)
-            conn.commit()
-            return cur
+        _CONN = sqlite3.connect(DB_PATH)
+        _CONN.row_factory = sqlite3.Row
+
+    return _CONN
 
 
-def db_fetchone(sql: str, params=None):
-    params = params or []
+def db_commit_and_sync():
+    """
+    Commit local e, se estiver no Turso, sincroniza com o remoto.
+    """
+    conn = get_conn()
+    conn.commit()
     if using_turso():
-        client = get_turso_client_sync()
-        rs = client.execute(sql, params)
-        return rs.rows[0] if rs.rows else None
-    else:
-        with get_sqlite_conn() as conn:
-            return conn.execute(sql, params).fetchone()
-
-
-def db_fetchall(sql: str, params=None):
-    params = params or []
-    if using_turso():
-        client = get_turso_client_sync()
-        rs = client.execute(sql, params)
-        return rs.rows
-    else:
-        with get_sqlite_conn() as conn:
-            return conn.execute(sql, params).fetchall()
+        conn.sync()
 
 
 def init_db():
-    # cria DB local se estiver em modo SQLite
-    if not using_turso():
-        if os.path.dirname(DB_PATH):
-            os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-
-    db_execute("""
+    conn = get_conn()
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS registros (
             cpf TEXT NOT NULL,
             dia TEXT NOT NULL,
@@ -114,6 +103,7 @@ def init_db():
             PRIMARY KEY (cpf, dia)
         )
     """)
+    db_commit_and_sync()
 
 
 # ---------- IP restriction ----------
@@ -149,22 +139,27 @@ def registrar_entrada(cpf, nome):
     hoje = date.today().isoformat()
     agora = datetime.now().isoformat(timespec="seconds")
 
-    r = db_fetchone("SELECT * FROM registros WHERE cpf=? AND dia=?", [cpf, hoje])
+    conn = get_conn()
+    r = conn.execute(
+        "SELECT * FROM registros WHERE cpf=? AND dia=?",
+        (cpf, hoje)
+    ).fetchone()
 
     if r and r["entrada"]:
         return False, "Entrada já registrada hoje."
 
     if r is None:
-        db_execute(
+        conn.execute(
             "INSERT INTO registros (cpf, dia, nome, entrada) VALUES (?,?,?,?)",
-            [cpf, hoje, nome, agora]
+            (cpf, hoje, nome, agora)
         )
     else:
-        db_execute(
+        conn.execute(
             "UPDATE registros SET entrada=? WHERE cpf=? AND dia=?",
-            [agora, cpf, hoje]
+            (agora, cpf, hoje)
         )
 
+    db_commit_and_sync()
     return True, "Entrada registrada com sucesso."
 
 
@@ -172,7 +167,11 @@ def registrar_saida(cpf):
     hoje = date.today().isoformat()
     agora = datetime.now().isoformat(timespec="seconds")
 
-    r = db_fetchone("SELECT * FROM registros WHERE cpf=? AND dia=?", [cpf, hoje])
+    conn = get_conn()
+    r = conn.execute(
+        "SELECT * FROM registros WHERE cpf=? AND dia=?",
+        (cpf, hoje)
+    ).fetchone()
 
     if not r or not r["entrada"]:
         return False, "Não há entrada registrada hoje."
@@ -180,11 +179,11 @@ def registrar_saida(cpf):
     if r["saida"]:
         return False, "Saída já registrada hoje."
 
-    db_execute(
+    conn.execute(
         "UPDATE registros SET saida=? WHERE cpf=? AND dia=?",
-        [agora, cpf, hoje]
+        (agora, cpf, hoje)
     )
-
+    db_commit_and_sync()
     return True, "Saída registrada com sucesso."
 
 
@@ -245,18 +244,14 @@ def admin():
     total_seconds = 0
     records = []
 
-    rows = db_fetchall(q, p)
-
-    for r in rows:
-        entrada = r["entrada"]
-        saida = r["saida"]
-
+    conn = get_conn()
+    for r in conn.execute(q, p).fetchall():
         tempo = "—"
         secs = 0
 
-        if entrada and saida:
-            ent = datetime.fromisoformat(entrada)
-            sai = datetime.fromisoformat(saida)
+        if r["entrada"] and r["saida"]:
+            ent = datetime.fromisoformat(r["entrada"])
+            sai = datetime.fromisoformat(r["saida"])
             secs = int((sai - ent).total_seconds())
             tempo = format_hhmm_from_seconds(secs)
 
@@ -265,8 +260,8 @@ def admin():
         records.append({
             "nome": r["nome"],
             "dia": format_ddmmyyyy(r["dia"]),
-            "entrada": format_hhmm(entrada),
-            "saida": format_hhmm(saida),
+            "entrada": format_hhmm(r["entrada"]),
+            "saida": format_hhmm(r["saida"]),
             "tempo": tempo
         })
 
@@ -285,7 +280,7 @@ def forbidden(_):
     return "<h1>403 - Acesso negado</h1>", 403
 
 
-# ✅ Inicializa o banco na subida do app (ok agora com client sync)
+# ✅ Inicializa o banco quando o app é importado pelo gunicorn
 init_db()
 
 if __name__ == "__main__":
