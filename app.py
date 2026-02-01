@@ -1,18 +1,16 @@
-from flask import Flask, render_template, request, redirect, url_for, flash, abort
+from flask import Flask, render_template, request, redirect, flash, abort
 import os
+import sqlite3
 from datetime import datetime, date
 
-# Turso/libSQL client
-from libsql_client import create_client
+import libsql_client  # ✅ importante: módulo correto
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# ---------- Arquivos locais ----------
 DB_PATH = os.environ.get("DB_PATH", os.path.join(APP_DIR, "attendance.db"))
 BOLSISTAS_PATH = os.path.join(APP_DIR, "bolsistas.txt")
 IPS_PATH = os.path.join(APP_DIR, "ips.txt")
 
-# ---------- Turso env vars ----------
 LIBSQL_URL = os.environ.get("LIBSQL_URL")
 LIBSQL_AUTH_TOKEN = os.environ.get("LIBSQL_AUTH_TOKEN")
 
@@ -41,19 +39,26 @@ def format_hhmm_from_seconds(seconds):
     return f"{m//60:02d}:{m%60:02d}"
 
 
-# ---------- DB Layer (Turso remoto ou SQLite local) ----------
+# ---------- DB Layer (Turso sync ou SQLite local) ----------
+
+_TURSO_CLIENT = None  # cache do client sync
 
 def using_turso() -> bool:
     return bool(LIBSQL_URL and LIBSQL_AUTH_TOKEN)
 
 
-def get_turso_client():
-    # Cria o client sob demanda
-    return create_client(url=LIBSQL_URL, auth_token=LIBSQL_AUTH_TOKEN)
+def get_turso_client_sync():
+    global _TURSO_CLIENT
+    if _TURSO_CLIENT is None:
+        # ✅ create_client_sync: roda loop em background e funciona em Flask/Gunicorn sync
+        _TURSO_CLIENT = libsql_client.create_client_sync(
+            LIBSQL_URL,
+            auth_token=LIBSQL_AUTH_TOKEN
+        )
+    return _TURSO_CLIENT
 
 
-def _sqlite_connect():
-    import sqlite3
+def get_sqlite_conn():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
@@ -62,11 +67,10 @@ def _sqlite_connect():
 def db_execute(sql: str, params=None):
     params = params or []
     if using_turso():
-        db = get_turso_client()
-        return db.execute(sql, params)
+        client = get_turso_client_sync()
+        return client.execute(sql, params)
     else:
-        # SQLite local (dev)
-        with _sqlite_connect() as conn:
+        with get_sqlite_conn() as conn:
             cur = conn.execute(sql, params)
             conn.commit()
             return cur
@@ -75,30 +79,28 @@ def db_execute(sql: str, params=None):
 def db_fetchone(sql: str, params=None):
     params = params or []
     if using_turso():
-        db = get_turso_client()
-        rows = db.execute(sql, params).rows
-        return rows[0] if rows else None
+        client = get_turso_client_sync()
+        rs = client.execute(sql, params)
+        return rs.rows[0] if rs.rows else None
     else:
-        with _sqlite_connect() as conn:
-            cur = conn.execute(sql, params)
-            return cur.fetchone()
+        with get_sqlite_conn() as conn:
+            return conn.execute(sql, params).fetchone()
 
 
 def db_fetchall(sql: str, params=None):
     params = params or []
     if using_turso():
-        db = get_turso_client()
-        return db.execute(sql, params).rows
+        client = get_turso_client_sync()
+        rs = client.execute(sql, params)
+        return rs.rows
     else:
-        with _sqlite_connect() as conn:
-            cur = conn.execute(sql, params)
-            return cur.fetchall()
+        with get_sqlite_conn() as conn:
+            return conn.execute(sql, params).fetchall()
 
 
 def init_db():
-    # Cria tabela no Turso (remoto) ou no SQLite (local)
+    # cria DB local se estiver em modo SQLite
     if not using_turso():
-        # garante pasta do DB local quando rodar no PC
         if os.path.dirname(DB_PATH):
             os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
@@ -128,11 +130,8 @@ def load_allowed_ips():
 
 
 def get_client_ip():
-    # Render/Proxies enviam X-Forwarded-For: "ip1, ip2, ..."
     xff = request.headers.get("X-Forwarded-For")
-    if xff:
-        return xff.split(",")[0].strip()
-    return request.remote_addr
+    return xff.split(",")[0].strip() if xff else request.remote_addr
 
 
 @app.before_request
@@ -150,10 +149,7 @@ def registrar_entrada(cpf, nome):
     hoje = date.today().isoformat()
     agora = datetime.now().isoformat(timespec="seconds")
 
-    r = db_fetchone(
-        "SELECT * FROM registros WHERE cpf=? AND dia=?",
-        [cpf, hoje]
-    )
+    r = db_fetchone("SELECT * FROM registros WHERE cpf=? AND dia=?", [cpf, hoje])
 
     if r and r["entrada"]:
         return False, "Entrada já registrada hoje."
@@ -176,10 +172,7 @@ def registrar_saida(cpf):
     hoje = date.today().isoformat()
     agora = datetime.now().isoformat(timespec="seconds")
 
-    r = db_fetchone(
-        "SELECT * FROM registros WHERE cpf=? AND dia=?",
-        [cpf, hoje]
-    )
+    r = db_fetchone("SELECT * FROM registros WHERE cpf=? AND dia=?", [cpf, hoje])
 
     if not r or not r["entrada"]:
         return False, "Não há entrada registrada hoje."
@@ -208,7 +201,6 @@ def registrar():
     pin = only_digits(request.form.get("pin"))
     action = request.form.get("action")
 
-    # Carrega bolsistas
     bolsistas = {}
     with open(BOLSISTAS_PATH, encoding="utf-8") as f:
         for l in f:
@@ -256,7 +248,6 @@ def admin():
     rows = db_fetchall(q, p)
 
     for r in rows:
-        # r pode ser sqlite3.Row (local) ou dict-like do libsql (remoto)
         entrada = r["entrada"]
         saida = r["saida"]
 
@@ -294,7 +285,7 @@ def forbidden(_):
     return "<h1>403 - Acesso negado</h1>", 403
 
 
-# Inicializa DB tanto em gunicorn quanto em execução direta
+# ✅ Inicializa o banco na subida do app (ok agora com client sync)
 init_db()
 
 if __name__ == "__main__":
