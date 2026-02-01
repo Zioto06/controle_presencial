@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Painel de Registros</title>
+
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+
+  <style>
+    .table-wrap{
+      margin-top:14px;
+      overflow:auto;
+      border-radius:14px;
+      border:1px solid rgba(255,255,255,.08);
+    }
+    table{
+      width:100%;
+      border-collapse:collapse;
+      min-width:760px;
+      background: rgba(255,255,255,.03);
+    }
+    th, td{
+      padding:12px 14px;
+      border-bottom:1px solid rgba(255,255,255,.08);
+      font-size:15px;
+    }
+    th{
+      text-align:left;
+      color: var(--muted);
+      font-weight:700;
+      background: rgba(255,255,255,.04);
+    }
+    .filters{
+      display:flex;
+      gap:12px;
+      flex-wrap:wrap;
+      align-items:end;
+    }
+    .filters .field{
+      display:grid;
+      gap:6px;
+    }
+    .filters input{
+      min-width:180px;
+    }
+    .mini{
+      font-size:13px;
+      color: var(--muted);
+      margin-top:10px;
+      display:flex;
+      gap:18px;
+      flex-wrap:wrap;
+      align-items:center;
+    }
+    .mini b{ color: var(--text); }
+  </style>
+</head>
+
+<body>
+  <div class="bg"></div>
+
+  <main class="wrap">
+    <section class="card" style="width:min(1100px, 96vw);">
+
+      <header class="header">
+        <h1>Painel de Registros</h1>
+        <p class="subtitle">Filtre por período e visualize na tela</p>
+      </header>
+
+      <!-- Filtros -->
+      <form method="GET" action="/admin" class="filters">
+        <div class="field">
+          <label class="label">Data inicial</label>
+          <input class="input" type="date" name="start" value="{{ start }}">
+        </div>
+
+        <div class="field">
+          <label class="label">Data final</label>
+          <input class="input" type="date" name="end" value="{{ end }}">
+        </div>
+
+        <button class="btn btn-primary" style="height:44px">
+          🔍 Filtrar
+        </button>
+      </form>
+
+      <div class="mini">
+        <span>Total de registros: <b>{{ total_registros }}</b></span>
+        <span>Tempo total no período: <b>{{ total_tempo }}</b></span>
+      </div>
+
+      <!-- Tabela -->
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Nome</th>
+              <th>Dia</th>
+              <th>Entrada</th>
+              <th>Saída</th>
+              <th>Tempo</th>
+            </tr>
+          </thead>
+          <tbody>
+
+            {% for r in records %}
+              <tr>
+                <td>{{ r.nome }}</td>
+                <td>{{ r.dia }}</td>
+                <td>{{ r.entrada }}</td>
+                <td>{{ r.saida }}</td>
+                <td>{{ r.tempo }}</td>
+              </tr>
+            {% endfor %}
+
+            {% if records|length == 0 %}
+              <tr>
+                <td colspan="5">Nenhum registro no período selecionado.</td>
+              </tr>
+            {% endif %}
+
+          </tbody>
+        </table>
+      </div>
+
+    </section>
+  </main>
+</body>
+</html>
