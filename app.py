@@ -60,25 +60,36 @@ def get_conn():
         return _CONN
 
     if using_turso():
-        # ✅ Embedded replica: cria/usa um arquivo local (mesmo se efêmero) e sincroniza com Turso
-        # O Render pode perder esse arquivo ao redeploy, mas ao subir ele sincroniza de novo.
         local_replica_path = os.path.join(APP_DIR, "replica.db")
+
+        # ✅ sanitiza valores (remove espaços/linhas)
+        sync_url = (TURSO_DATABASE_URL or "").strip().strip('"').strip("'")
+        auth = (TURSO_AUTH_TOKEN or "").strip().strip('"').strip("'")
+
+        # ✅ aceita se o usuário colocou https por engano e converte para libsql
+        if sync_url.startswith("https://"):
+            sync_url = "libsql://" + sync_url.removeprefix("https://")
+        if sync_url.startswith("http://"):
+            sync_url = "libsql://" + sync_url.removeprefix("http://")
+
+        # ✅ remove barra final
+        sync_url = sync_url.rstrip("/")
 
         _CONN = libsql.connect(
             local_replica_path,
-            sync_url=TURSO_DATABASE_URL,
-            auth_token=TURSO_AUTH_TOKEN
+            sync_url=sync_url,
+            auth_token=auth
         )
         _CONN.row_factory = sqlite3.Row
 
-        # ✅ sincroniza no startup (baixa o estado do banco remoto)
+        # sincroniza no startup (baixa estado do remoto)
         _CONN.sync()
-
     else:
         _CONN = sqlite3.connect(DB_PATH)
         _CONN.row_factory = sqlite3.Row
 
     return _CONN
+
 
 
 def db_commit_and_sync():
@@ -286,3 +297,4 @@ init_db()
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+
