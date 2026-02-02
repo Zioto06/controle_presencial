@@ -1,186 +1,155 @@
 from flask import Flask, render_template, request, redirect, url_for, flash, abort
 import os
 from datetime import datetime, date
-from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+from zoneinfo import ZoneInfo
 
 import psycopg2
-from psycopg2.extras import RealDictCursor
+import psycopg2.extras
 
+
+# -------------------- Config --------------------
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "troque-esta-chave")
 
+DATABASE_URL = os.environ.get("DATABASE_URL")  # Render fornece isso
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL não configurada. Defina nas Environment Variables do Render.")
 
-# ---------- Utilidades ----------
+TZ_BR = ZoneInfo("America/Sao_Paulo")
+TZ_UTC = ZoneInfo("UTC")
+
+
+# -------------------- Utilidades --------------------
 def only_digits(s: str) -> str:
     return "".join(ch for ch in (s or "") if ch.isdigit())
 
 
-def _normalize_database_url(url: str) -> str:
-    """
-    Render fornece DATABASE_URL normalmente. Algumas vezes vem sem sslmode.
-    Esta função garante sslmode=require quando estiver em produção no Render.
-    """
-    if not url:
-        return url
-
-    # Render costuma usar postgres:// ; psycopg2 aceita, mas vamos manter.
-    parsed = urlparse(url)
-    q = parse_qs(parsed.query)
-
-    # Se já tem sslmode, respeita
-    if "sslmode" not in q:
-        q["sslmode"] = ["require"]
-
-    new_query = urlencode(q, doseq=True)
-    return urlunparse(
-        (parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment)
-    )
-
-
-def get_db_url() -> str:
-    db_url = os.environ.get("DATABASE_URL")
-    if not db_url:
-        raise RuntimeError(
-            "DATABASE_URL não configurada. No Render, crie um PostgreSQL e vincule ao serviço."
-        )
-    return _normalize_database_url(db_url)
-
-
 def get_conn():
-    return psycopg2.connect(get_db_url(), cursor_factory=RealDictCursor)
+    # RealDictCursor: r["campo"] em vez de r[0]
+    return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
 
 
 def init_db():
-    """
-    Cria as tabelas necessárias no Postgres.
-    - registros: presença (cpf + dia chave primária)
-    - bolsistas: credencial (cpf + pin)
-    - ips_permitidos: lista de IPs liberados (opcional)
-    """
-    ddl = """
-    CREATE TABLE IF NOT EXISTS registros (
-        cpf    TEXT NOT NULL,
-        dia    DATE NOT NULL,
-        nome   TEXT NOT NULL,
-        entrada TIMESTAMP,
-        saida   TIMESTAMP,
-        PRIMARY KEY (cpf, dia)
-    );
-
-    CREATE TABLE IF NOT EXISTS bolsistas (
-        cpf  TEXT PRIMARY KEY,
-        nome TEXT NOT NULL,
-        pin  TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS ips_permitidos (
-        ip TEXT PRIMARY KEY
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_registros_dia ON registros (dia);
-    CREATE INDEX IF NOT EXISTS idx_registros_nome ON registros (nome);
-    """
+    # Cria tabelas caso não existam
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(ddl)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS registros (
+                    cpf TEXT NOT NULL,
+                    dia DATE NOT NULL,
+                    nome TEXT NOT NULL,
+                    entrada TIMESTAMP,
+                    saida TIMESTAMP,
+                    PRIMARY KEY (cpf, dia)
+                );
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS bolsistas (
+                    cpf TEXT PRIMARY KEY,
+                    nome TEXT NOT NULL,
+                    pin TEXT NOT NULL
+                );
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ips_permitidos (
+                    ip TEXT PRIMARY KEY
+                );
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_registros_dia ON registros (dia);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_registros_nome ON registros (nome);")
         conn.commit()
 
 
+def utc_now():
+    # Sempre gravar em UTC
+    return datetime.now(tz=TZ_UTC)
+
+
+def utc_to_local(dt_utc):
+    """Converte datetime UTC -> horário Brasil para exibição/cálculo."""
+    if not dt_utc:
+        return None
+    if dt_utc.tzinfo is None:
+        dt_utc = dt_utc.replace(tzinfo=TZ_UTC)
+    return dt_utc.astimezone(TZ_BR)
+
+
 def format_ddmmyyyy(dia_date):
-    # dia_date pode vir como datetime.date (Postgres)
+    # dia_date é DATE do Postgres -> datetime.date
     if not dia_date:
-        return "—"
+        return ""
     return dia_date.strftime("%d-%m-%Y")
 
 
-def format_hhmm(dt_value):
-    # dt_value pode vir como datetime.datetime (Postgres)
-    if not dt_value:
+def format_hhmm(dt_utc):
+    if not dt_utc:
         return "—"
-    return dt_value.strftime("%H:%M")
+    local = utc_to_local(dt_utc)
+    return local.strftime("%H:%M")
 
 
-def format_hhmm_from_seconds(seconds: int) -> str:
-    if seconds <= 0:
+def format_hhmm_from_seconds(seconds):
+    if not seconds or seconds <= 0:
         return "00:00"
     m = seconds // 60
     return f"{m//60:02d}:{m%60:02d}"
 
 
-# ---------- IP restriction ----------
+# -------------------- IP restriction --------------------
 def load_allowed_ips():
-    allowed = set()
+    """Lê ips_permitidos. Se vazio -> libera geral."""
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT ip FROM ips_permitidos")
             rows = cur.fetchall()
-    for r in rows:
-        allowed.add(r["ip"])
-    return allowed
+    return {r["ip"] for r in rows}
 
 
 def get_client_ip():
-    # Importante: o Render usa proxy, então X-Forwarded-For é relevante
+    # Render usa proxy -> X-Forwarded-For normalmente vem com o IP real do cliente
     xff = request.headers.get("X-Forwarded-For")
-    if xff:
-        return xff.split(",")[0].strip()
-    return request.remote_addr
+    return xff.split(",")[0].strip() if xff else request.remote_addr
 
 
 @app.before_request
 def restrict_by_ip():
     allowed = load_allowed_ips()
-
-    # Se não houver IP cadastrado, libera (mesmo comportamento do seu código
-    # quando ips.txt está vazio ou não existe).
     if not allowed:
-        return
-
+        return  # tabela vazia: libera geral
     if get_client_ip() not in allowed:
         abort(403)
 
 
-# ---------- Bolsistas ----------
-def get_bolsistas_dict():
-    """
-    Retorna dict {cpf: {"nome":..., "pin":...}}
-    """
-    bolsistas = {}
+# -------------------- Bolsistas --------------------
+def get_bolsista(cpf: str):
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT cpf, nome, pin FROM bolsistas")
-            rows = cur.fetchall()
-
-    for r in rows:
-        bolsistas[r["cpf"]] = {"nome": r["nome"], "pin": r["pin"]}
-    return bolsistas
+            cur.execute("SELECT cpf, nome, pin FROM bolsistas WHERE cpf = %s", (cpf,))
+            return cur.fetchone()
 
 
-# ---------- Registro ----------
+# -------------------- Registro --------------------
 def registrar_entrada(cpf, nome):
-    hoje = date.today()
-    agora = datetime.now()
+    hoje = date.today()                 # date local do servidor (não impacta muito)
+    agora = utc_now()                   # timestamp UTC correto
 
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT cpf, dia, entrada FROM registros WHERE cpf=%s AND dia=%s",
-                (cpf, hoje),
-            )
+            cur.execute("SELECT entrada FROM registros WHERE cpf=%s AND dia=%s", (cpf, hoje))
             r = cur.fetchone()
 
             if r and r.get("entrada"):
                 return False, "Entrada já registrada hoje."
 
-            if r is None:
+            if not r:
                 cur.execute(
                     "INSERT INTO registros (cpf, dia, nome, entrada) VALUES (%s,%s,%s,%s)",
                     (cpf, hoje, nome, agora),
                 )
             else:
                 cur.execute(
-                    "UPDATE registros SET entrada=%s WHERE cpf=%s AND dia=%s",
-                    (agora, cpf, hoje),
+                    "UPDATE registros SET entrada=%s, nome=%s WHERE cpf=%s AND dia=%s",
+                    (agora, nome, cpf, hoje),
                 )
 
         conn.commit()
@@ -190,19 +159,15 @@ def registrar_entrada(cpf, nome):
 
 def registrar_saida(cpf):
     hoje = date.today()
-    agora = datetime.now()
+    agora = utc_now()
 
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT cpf, dia, entrada, saida FROM registros WHERE cpf=%s AND dia=%s",
-                (cpf, hoje),
-            )
+            cur.execute("SELECT entrada, saida FROM registros WHERE cpf=%s AND dia=%s", (cpf, hoje))
             r = cur.fetchone()
 
             if not r or not r.get("entrada"):
                 return False, "Não há entrada registrada hoje."
-
             if r.get("saida"):
                 return False, "Saída já registrada hoje."
 
@@ -216,7 +181,7 @@ def registrar_saida(cpf):
     return True, "Saída registrada com sucesso."
 
 
-# ---------- Rotas ----------
+# -------------------- Rotas --------------------
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -228,76 +193,72 @@ def registrar():
     pin = only_digits(request.form.get("pin"))
     action = request.form.get("action")
 
-    bolsistas = get_bolsistas_dict()
+    if len(cpf) != 11:
+        flash("CPF inválido.", "error")
+        return redirect(url_for("index"))
 
-    if cpf not in bolsistas or bolsistas[cpf]["pin"] != pin:
+    bolsista = get_bolsista(cpf)
+    if not bolsista or bolsista["pin"] != pin:
         flash("CPF ou PIN inválido.", "error")
-        return redirect("/")
+        return redirect(url_for("index"))
 
     if action == "entrada":
-        ok, msg = registrar_entrada(cpf, bolsistas[cpf]["nome"])
+        ok, msg = registrar_entrada(cpf, bolsista["nome"])
     else:
         ok, msg = registrar_saida(cpf)
 
     flash(msg, "success" if ok else "error")
-    return redirect("/")
+    return redirect(url_for("index"))
 
 
 @app.route("/admin")
 def admin():
-    # start/end chegam como yyyy-mm-dd (string)
-    start = request.args.get("start")
-    end = request.args.get("end")
+    start = request.args.get("start")  # yyyy-mm-dd
+    end = request.args.get("end")      # yyyy-mm-dd
 
-    where = []
-    params = []
+    q = "SELECT cpf, dia, nome, entrada, saida FROM registros"
+    p = []
+    w = []
 
-    # dia é DATE no Postgres
     if start:
-        where.append("dia >= %s")
-        params.append(start)
+        w.append("dia >= %s")
+        p.append(start)
     if end:
-        where.append("dia <= %s")
-        params.append(end)
+        w.append("dia <= %s")
+        p.append(end)
 
-    q = """
-        SELECT cpf, dia, nome, entrada, saida
-        FROM registros
-    """
-    if where:
-        q += " WHERE " + " AND ".join(where)
+    if w:
+        q += " WHERE " + " AND ".join(w)
 
     q += " ORDER BY dia DESC, nome"
 
-    total_seconds = 0
     records = []
+    total_seconds = 0
 
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(q, params)
+            cur.execute(q, tuple(p))
             rows = cur.fetchall()
 
     for r in rows:
         tempo = "—"
         secs = 0
 
-        ent = r.get("entrada")
-        sai = r.get("saida")
-
-        if ent and sai:
-            secs = int((sai - ent).total_seconds())
+        if r.get("entrada") and r.get("saida"):
+            ent_local = utc_to_local(r["entrada"])
+            sai_local = utc_to_local(r["saida"])
+            secs = int((sai_local - ent_local).total_seconds())
+            secs = max(secs, 0)
             tempo = format_hhmm_from_seconds(secs)
-            total_seconds += max(secs, 0)
+            total_seconds += secs
 
-        records.append(
-            {
-                "nome": r["nome"],
-                "dia": format_ddmmyyyy(r["dia"]),
-                "entrada": format_hhmm(ent),
-                "saida": format_hhmm(sai),
-                "tempo": tempo,
-            }
-        )
+        records.append({
+            "nome": r["nome"],
+            "dia": format_ddmmyyyy(r["dia"]),
+            "entrada": format_hhmm(r.get("entrada")),
+            "saida": format_hhmm(r.get("saida")),
+            "tempo": tempo
+        })
 
     return render_template(
         "admin.html",
@@ -314,7 +275,12 @@ def forbidden(_):
     return "<h1>403 - Acesso negado</h1>", 403
 
 
+# -------------------- Entrypoint --------------------
+# No Render/Gunicorn, este bloco NÃO roda.
+# Mas deixamos init_db() sempre ser chamado ao importar o módulo,
+# garantindo que tabelas existam.
+init_db()
+
 if __name__ == "__main__":
-    init_db()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
