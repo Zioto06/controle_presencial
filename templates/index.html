@@ -7,67 +7,17 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 
     <style>
-      .table-wrap{
-        margin-top:14px;
-        overflow:auto;
-        border-radius:14px;
-        border:1px solid rgba(255,255,255,.08);
-      }
-      table{
-        width:100%;
-        border-collapse:collapse;
-        min-width:760px;
-        background: rgba(255,255,255,.03);
-      }
-      th, td{
-        padding:12px 14px;
-        border-bottom:1px solid rgba(255,255,255,.08);
-        font-size:15px;
-      }
-      th{
-        text-align:left;
-        color: var(--muted);
-        font-weight:700;
-        background: rgba(255,255,255,.04);
-      }
-      .filters{
-        display:flex;
-        gap:12px;
-        flex-wrap:wrap;
-        align-items:end;
-      }
-      .filters .field{
-        display:grid;
-        gap:6px;
-      }
-      .filters input{
-        min-width:180px;
-      }
-      .mini{
-        font-size:13px;
-        color: var(--muted);
-        margin-top:10px;
-        display:flex;
-        gap:18px;
-        flex-wrap:wrap;
-        align-items:center;
-      }
-      .mini b{
-        color: var(--text);
-      }
-      .top-actions{
-        display:flex;
-        justify-content:space-between;
-        gap:12px;
-        align-items:center;
-        flex-wrap:wrap;
-        margin-top:10px;
-      }
-      .link{
-        color: var(--muted);
-        text-decoration: underline;
-        font-size: 13px;
-      }
+      .table-wrap{ margin-top:14px; overflow:auto; border-radius:14px; border:1px solid rgba(255,255,255,.08); }
+      table{ width:100%; border-collapse:collapse; min-width:760px; background: rgba(255,255,255,.03); }
+      th, td{ padding:12px 14px; border-bottom:1px solid rgba(255,255,255,.08); font-size:15px; }
+      th{ text-align:left; color: var(--muted); font-weight:700; background: rgba(255,255,255,.04); }
+      .filters{ display:flex; gap:12px; flex-wrap:wrap; align-items:end; }
+      .filters .field{ display:grid; gap:6px; }
+      .filters input{ min-width:180px; }
+      .mini{ font-size:13px; color: var(--muted); margin-top:10px; display:flex; gap:18px; flex-wrap:wrap; align-items:center; }
+      .mini b{ color: var(--text); }
+      .top-actions{ display:flex; justify-content:space-between; gap:12px; align-items:center; flex-wrap:wrap; margin-top:10px; }
+      .link{ color: var(--muted); text-decoration: underline; font-size: 13px; }
     </style>
   </head>
 
@@ -81,12 +31,12 @@
           <p class="subtitle">Filtre por período e visualize na tela</p>
 
           <div class="top-actions">
-            <a class="link" href="/">← Voltar para o registro</a>
+            <!-- ✅ Agora vai SEMPRE para a rota "/" correta -->
+            <a class="link" href="{{ url_for('index') }}">← Voltar para o registro</a>
           </div>
         </header>
 
-        <!-- Filtros -->
-        <form method="GET" action="/admin" class="filters">
+        <form method="GET" action="{{ url_for('admin') }}" class="filters">
           <div class="field">
             <label class="label">Data inicial</label>
             <input class="input" type="date" name="start" value="{{ start }}">
@@ -97,9 +47,7 @@
             <input class="input" type="date" name="end" value="{{ end }}">
           </div>
 
-          <button class="btn btn-primary" style="height:44px">
-            🔍 Filtrar
-          </button>
+          <button class="btn btn-primary" style="height:44px">🔍 Filtrar</button>
         </form>
 
         <div class="mini">
@@ -107,7 +55,6 @@
           <span>Tempo total no período: <b>{{ total_tempo }}</b></span>
         </div>
 
-        <!-- Tabela -->
         <div class="table-wrap">
           <table>
             <thead>
@@ -119,7 +66,6 @@
                 <th>Tempo</th>
               </tr>
             </thead>
-
             <tbody>
               {% for r in records %}
                 <tr>
