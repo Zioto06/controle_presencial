@@ -75,4 +75,46 @@
           </div>
 
           <p class="hint">
-            Informe o CPF e o PIN cadastrados e se
+            Informe o CPF e o PIN cadastrados e selecione a ação desejada.
+          </p>
+
+          <!-- (Opcional) Link para admin -->
+          <p class="hint" style="margin-top:10px">
+            <a href="/admin" style="color: var(--muted); text-decoration: underline;">
+              Acessar painel (/admin)
+            </a>
+          </p>
+        </form>
+      </section>
+    </main>
+
+    <!-- Validação extra (mobile-friendly) -->
+    <script>
+      const form = document.querySelector("form.form");
+      const cpf = document.getElementById("cpf");
+      const pin = document.getElementById("pin");
+
+      form.addEventListener("submit", (e) => {
+        const cpfVal = (cpf.value || "").replace(/\D/g, "");
+        const pinVal = (pin.value || "").replace(/\D/g, "");
+
+        if (cpfVal.length !== 11) {
+          e.preventDefault();
+          alert("CPF inválido. Digite exatamente 11 números.");
+          cpf.focus();
+          return;
+        }
+
+        if (!pinVal) {
+          e.preventDefault();
+          alert("PIN inválido. Digite o PIN cadastrado.");
+          pin.focus();
+          return;
+        }
+      });
+
+      // foco automático no CPF
+      cpf.focus();
+    </script>
+  </body>
+</html>
