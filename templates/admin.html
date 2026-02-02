@@ -55,3 +55,87 @@
       .mini b{ color: var(--text); }
       .top-actions{
         display:flex;
+        justify-content:space-between;
+        margin-top:8px;
+      }
+      .link{
+        color: var(--muted);
+        font-size:13px;
+        text-decoration: underline;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div class="bg"></div>
+
+    <main class="wrap">
+      <section class="card" style="width:min(1100px, 96vw);">
+        <header class="header">
+          <h1>Painel de Registros</h1>
+          <p class="subtitle">Filtre por período e visualize na tela</p>
+
+          <div class="top-actions">
+            <a class="link" href="{{ url_for('index') }}">
+              ← Voltar para o registro
+            </a>
+          </div>
+        </header>
+
+        <form method="GET" action="{{ url_for('admin') }}" class="filters">
+          <div class="field">
+            <label class="label">Data inicial</label>
+            <input class="input" type="date" name="start" value="{{ start }}">
+          </div>
+
+          <div class="field">
+            <label class="label">Data final</label>
+            <input class="input" type="date" name="end" value="{{ end }}">
+          </div>
+
+          <button class="btn btn-primary" style="height:44px">
+            🔍 Filtrar
+          </button>
+        </form>
+
+        <div class="mini">
+          <span>Total de registros: <b>{{ total_registros }}</b></span>
+          <span>Tempo total no período: <b>{{ total_tempo }}</b></span>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Nome</th>
+                <th>Dia</th>
+                <th>Entrada</th>
+                <th>Saída</th>
+                <th>Tempo</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for r in records %}
+                <tr>
+                  <td>{{ r.nome }}</td>
+                  <td>{{ r.dia }}</td>
+                  <td>{{ r.entrada }}</td>
+                  <td>{{ r.saida }}</td>
+                  <td>{{ r.tempo }}</td>
+                </tr>
+              {% endfor %}
+
+              {% if records|length == 0 %}
+                <tr>
+                  <td colspan="5">
+                    Nenhum registro no período selecionado.
+                  </td>
+                </tr>
+              {% endif %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
