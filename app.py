@@ -271,3 +271,63 @@ def admin():
     w = []
 
     if start:
+        w.append("dia >= %s")
+        p.append(start)
+    if end:
+        w.append("dia <= %s")
+        p.append(end)
+
+    if w:
+        q += " WHERE " + " AND ".join(w)
+
+    q += " ORDER BY dia DESC, nome"
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(q, tuple(p))
+            rows = cur.fetchall()
+
+    records = []
+    total_seconds = 0
+
+    for r in rows:
+        tempo = "—"
+        secs = 0
+
+        if r["entrada"] and r["saida"]:
+            ent = utc_to_local(r["entrada"])
+            sai = utc_to_local(r["saida"])
+            secs = max(int((sai - ent).total_seconds()), 0)
+            tempo = format_hhmm_from_seconds(secs)
+            total_seconds += secs
+
+        records.append({
+            "nome": r["nome"],
+            "dia": format_ddmmyyyy(r["dia"]),
+            "entrada": format_hhmm(r["entrada"]),
+            "saida": format_hhmm(r["saida"]),
+            "tempo": tempo
+        })
+
+    return render_template(
+        "admin.html",
+        records=records,
+        total_tempo=format_hhmm_from_seconds(total_seconds),
+        total_registros=len(records),
+        start=start,
+        end=end
+    )
+
+
+# -------------------- Erros --------------------
+@app.errorhandler(403)
+def forbidden(_):
+    return "<h1>403 - Acesso negado</h1>", 403
+
+
+# -------------------- Init --------------------
+init_db()
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
