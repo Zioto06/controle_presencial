@@ -302,8 +302,10 @@ def forbidden(_):
 # No Render/Gunicorn, este bloco NÃO roda.
 # Mas deixamos init_db() sempre ser chamado ao importar o módulo,
 # garantindo que tabelas existam.
-init_db()
+if os.environ.get("INIT_DB", "0") == "1":
+    init_db()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+
